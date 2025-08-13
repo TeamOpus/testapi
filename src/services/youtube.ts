@@ -28,6 +28,31 @@ export class YouTube {
     ];
 
     /**
+     * Check yt-dlp version and warn if potentially outdated
+     */
+    private static async checkYtDlpVersion(): Promise<void> {
+        try {
+            const versionInfo = await youtubedl('--version');
+            console.log('yt-dlp version:', versionInfo);
+            
+            // Parse version (e.g., "2023.12.30" format)
+            const versionMatch = versionInfo.toString().match(/(\d{4}\.\d{2}\.\d{2})/);
+            if (versionMatch) {
+                const version = versionMatch[1];
+                const versionDate = new Date(version);
+                const now = new Date();
+                const daysDiff = Math.floor((now.getTime() - versionDate.getTime()) / (1000 * 60 * 60 * 24));
+                
+                if (daysDiff > 30) {
+                    console.warn(`⚠️  yt-dlp version is ${daysDiff} days old. Consider updating: pip install --upgrade yt-dlp`);
+                }
+            }
+        } catch (error) {
+            console.warn('Could not check yt-dlp version:', error.message);
+        }
+    }
+
+    /**
      * Downloads cookies from remote URL and saves to temp file
      */
     private static async downloadCookies(): Promise<string | null> {
@@ -132,6 +157,9 @@ export class YouTube {
         let lastError: Error | null = null;
         let cookiesFile: string | null = null;
 
+        // Check yt-dlp version on first run
+        await this.checkYtDlpVersion();
+
         // Get cookies file once before retries
         try {
             cookiesFile = await this.getCookiesFile();
@@ -151,7 +179,11 @@ export class YouTube {
                     noCheckCertificates: true,
                     noWarnings: true,
                     preferFreeFormats: true,
-                    addHeader: headers
+                    addHeader: headers,
+                    // Add additional yt-dlp options for better compatibility
+                    extractFlat: false,
+                    writeSubVtt: false,
+                    writeAutoSub: false
                 };
 
                 // Add cookies if available
@@ -165,7 +197,7 @@ export class YouTube {
                 const video = await Promise.race([
                     youtubedl(url, options),
                     new Promise<never>((_, reject) => 
-                        setTimeout(() => reject(new Error('Request timeout after 15 seconds')), 15000)
+                        setTimeout(() => reject(new Error('Request timeout after 20 seconds')), 20000)
                     )
                 ]);
 
@@ -188,14 +220,18 @@ export class YouTube {
                     stderr: error.stderr ? error.stderr.substring(0, 200) + '...' : 'No stderr'
                 });
 
-                // If authentication error and no cookies were used, try to get fresh cookies
-                if (error.message?.includes('Sign in to confirm') && !cookiesFile && attempt === 1) {
-                    console.log('Authentication required - attempting to download fresh cookies...');
-                    cookiesFile = await this.downloadCookies();
+                // Handle specific yt-dlp errors
+                if (error.message?.includes('Failed to extract any player response')) {
+                    console.error('🔄 yt-dlp version may be outdated. Try: pip install --upgrade yt-dlp');
+                    
+                    // If this is the first attempt, suggest immediate action
+                    if (attempt === 1) {
+                        console.error('💡 This error usually indicates yt-dlp needs updating to handle YouTube\'s current format');
+                    }
                 }
 
                 if (attempt < maxRetries) {
-                    const delay = Math.random() * 3000 + 2000; // Random delay 2-5 seconds
+                    const delay = Math.random() * 4000 + 3000; // Random delay 3-7 seconds
                     console.log(`Waiting ${Math.round(delay)}ms before retry...`);
                     await new Promise(resolve => setTimeout(resolve, delay));
                 }
@@ -272,7 +308,10 @@ export class YouTube {
             });
 
             // Handle specific YouTube errors with helpful messages
-            if (error.message?.includes('Sign in to confirm')) {
+            if (error.message?.includes('Failed to extract any player response')) {
+                console.error('🔧 SOLUTION: Update yt-dlp with: pip install --upgrade yt-dlp');
+                console.error('📅 This error indicates yt-dlp version is incompatible with current YouTube API');
+            } else if (error.message?.includes('Sign in to confirm')) {
                 console.error('🔐 YouTube authentication required. Ensure cookies are valid and recent.');
             } else if (error.message?.includes('403')) {
                 console.error('🚫 Access forbidden - may need fresh cookies or different IP.');
