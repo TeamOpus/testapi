@@ -132,7 +132,7 @@ export class YouTube {
                 });
         }
 
-        // Process formats with error handling
+        // Process formats with error handling and proper type conversion
         if (video.formats && Array.isArray(video.formats)) {
             videoData.formats = video.formats
                 .filter(f => f.url) // Only include formats with valid URLs
@@ -146,7 +146,7 @@ export class YouTube {
 
                     return {
                         type,
-                        quality: f.qualityLabel || f.quality || 'unknown',
+                        quality: (f.qualityLabel || f.quality || 'unknown').toString(),
                         container: f.container || 'unknown',
                         codecs: f.codecs || 'unknown',
                         url: f.url,
@@ -160,7 +160,7 @@ export class YouTube {
                     if (a.type !== b.type) {
                         return a.type - b.type;
                     }
-                    // Then by quality
+                    // Then by quality - ensure both parameters are strings
                     return this.compareQuality(b.quality, a.quality);
                 });
         }
