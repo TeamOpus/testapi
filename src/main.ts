@@ -3,6 +3,7 @@ import defaultRoute from "./routes/default";
 
 const app: Application = express();
 const port: number = parseInt(process.env.PORT) || 4131;
+const host: string = process.env.HOST || "localhost"; // Add this line
 
 app.set("views", "views");
 app.set("view engine", "pug");
@@ -10,6 +11,7 @@ app.set("view engine", "pug");
 app.use(express.static("public"));
 app.use(defaultRoute);
 
-app.listen(port, () => {
-    console.log("App started on port: " + port);
+// Modified listen call with both host and port
+app.listen(port, host, () => {
+    console.log(`App started on ${host}:${port}`);
 });
