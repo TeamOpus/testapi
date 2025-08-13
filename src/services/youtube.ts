@@ -1,12 +1,112 @@
 import youtubedl from 'youtube-dl-exec';
 import { FormatType, VideoData } from "../types/youtube";
 import NodeCache from "node-cache";
+import * as fs from 'fs';
+import * as path from 'path';
 
 export class YouTube {
     private static cache = new NodeCache({ 
         stdTTL: 3600, // 1 hour cache
         checkperiod: 600 // Check for expired keys every 10 minutes
     });
+
+    private static readonly COOKIES_URL = 'https://v0-mongo-db-api-setup.vercel.app/api/cookies.txt';
+    private static readonly COOKIES_FILE = path.join(process.cwd(), 'temp_cookies.txt');
+
+    /**
+     * Pool of rotating user agents to avoid detection
+     */
+    private static readonly USER_AGENTS = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:121.0) Gecko/20100101 Firefox/121.0',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/120.0.0.0 Safari/537.36'
+    ];
+
+    /**
+     * Downloads cookies from remote URL and saves to temp file
+     */
+    private static async downloadCookies(): Promise<string | null> {
+        try {
+            console.log('Downloading fresh cookies from remote URL...');
+            
+            const response = await fetch(this.COOKIES_URL, {
+                headers: {
+                    'User-Agent': this.USER_AGENTS[Math.floor(Math.random() * this.USER_AGENTS.length)]
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+
+            const cookieContent = await response.text();
+            
+            // Validate Netscape format
+            if (!cookieContent.includes('# Netscape HTTP Cookie File') && 
+                !cookieContent.includes('# HTTP Cookie File')) {
+                throw new Error('Invalid cookie format - missing Netscape header');
+            }
+
+            // Save to temporary file
+            fs.writeFileSync(this.COOKIES_FILE, cookieContent, 'utf8');
+            console.log('Cookies downloaded and saved successfully');
+            
+            return this.COOKIES_FILE;
+
+        } catch (error) {
+            console.error('Failed to download cookies:', error.message);
+            return null;
+        }
+    }
+
+    /**
+     * Gets available cookies file path (local or downloaded)
+     */
+    private static async getCookiesFile(): Promise<string | null> {
+        // Check for local cookies.txt first
+        const localCookiesPath = path.join(process.cwd(), 'cookies.txt');
+        
+        if (fs.existsSync(localCookiesPath)) {
+            try {
+                const content = fs.readFileSync(localCookiesPath, 'utf8');
+                if (content.includes('# Netscape HTTP Cookie File') || 
+                    content.includes('# HTTP Cookie File')) {
+                    console.log('Using local cookies.txt file');
+                    return localCookiesPath;
+                }
+            } catch (error) {
+                console.warn('Local cookies.txt exists but is not readable:', error.message);
+            }
+        }
+
+        // Fallback to remote cookies
+        console.log('No local cookies found, attempting to download...');
+        return await this.downloadCookies();
+    }
+
+    /**
+     * Generates random headers to avoid detection
+     */
+    private static getRandomHeaders(): string[] {
+        const randomUserAgent = this.USER_AGENTS[Math.floor(Math.random() * this.USER_AGENTS.length)];
+        
+        return [
+            `user-agent:${randomUserAgent}`,
+            'accept:text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'accept-language:en-US,en;q=0.9',
+            'accept-encoding:gzip, deflate, br',
+            'dnt:1',
+            'upgrade-insecure-requests:1',
+            'sec-fetch-dest:document',
+            'sec-fetch-mode:navigate',
+            'sec-fetch-site:none'
+        ];
+    }
 
     /**
      * Validates if the provided URL is a valid YouTube URL
@@ -26,7 +126,96 @@ export class YouTube {
     }
 
     /**
-     * Fetches video information using yt-dlp
+     * Attempts to fetch video info with cookies and retry strategies
+     */
+    private static async fetchWithRetry(url: string, maxRetries = 3): Promise<any | null> {
+        let lastError: Error | null = null;
+        let cookiesFile: string | null = null;
+
+        // Get cookies file once before retries
+        try {
+            cookiesFile = await this.getCookiesFile();
+        } catch (error) {
+            console.warn('Failed to get cookies file:', error.message);
+        }
+
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                console.log(`Attempt ${attempt}/${maxRetries} for video info fetch`);
+                
+                const headers = this.getRandomHeaders();
+                console.log('Using User-Agent:', headers[0].substring(11, 61) + '...');
+
+                const options: any = {
+                    dumpSingleJson: true,
+                    noCheckCertificates: true,
+                    noWarnings: true,
+                    preferFreeFormats: true,
+                    addHeader: headers
+                };
+
+                // Add cookies if available
+                if (cookiesFile) {
+                    options.cookies = cookiesFile;
+                    console.log('Using cookies file for authentication');
+                } else {
+                    console.warn('No cookies available - proceeding without authentication');
+                }
+
+                const video = await Promise.race([
+                    youtubedl(url, options),
+                    new Promise<never>((_, reject) => 
+                        setTimeout(() => reject(new Error('Request timeout after 15 seconds')), 15000)
+                    )
+                ]);
+
+                // Clean up temp cookies file after successful request
+                if (cookiesFile === this.COOKIES_FILE && fs.existsSync(this.COOKIES_FILE)) {
+                    try {
+                        fs.unlinkSync(this.COOKIES_FILE);
+                        console.log('Temporary cookies file cleaned up');
+                    } catch (cleanupError) {
+                        console.warn('Failed to cleanup temp cookies:', cleanupError.message);
+                    }
+                }
+
+                return video;
+
+            } catch (error) {
+                lastError = error;
+                console.error(`Attempt ${attempt} failed:`, {
+                    message: error.message,
+                    stderr: error.stderr ? error.stderr.substring(0, 200) + '...' : 'No stderr'
+                });
+
+                // If authentication error and no cookies were used, try to get fresh cookies
+                if (error.message?.includes('Sign in to confirm') && !cookiesFile && attempt === 1) {
+                    console.log('Authentication required - attempting to download fresh cookies...');
+                    cookiesFile = await this.downloadCookies();
+                }
+
+                if (attempt < maxRetries) {
+                    const delay = Math.random() * 3000 + 2000; // Random delay 2-5 seconds
+                    console.log(`Waiting ${Math.round(delay)}ms before retry...`);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
+            }
+        }
+
+        // Clean up temp cookies file even if all attempts failed
+        if (cookiesFile === this.COOKIES_FILE && fs.existsSync(this.COOKIES_FILE)) {
+            try {
+                fs.unlinkSync(this.COOKIES_FILE);
+            } catch (cleanupError) {
+                console.warn('Failed to cleanup temp cookies after failure:', cleanupError.message);
+            }
+        }
+
+        throw lastError;
+    }
+
+    /**
+     * Fetches video information with comprehensive error handling
      */
     static async getVideoInfo(url: string | any): Promise<VideoData | null> {
         try {
@@ -58,25 +247,16 @@ export class YouTube {
 
             console.log('Fetching video info for:', videoId);
 
-            // Fetch video information using yt-dlp
-            const videoInfo = await youtubedl(urlString, {
-                dumpSingleJson: true,
-                noCheckCertificates: true,
-                noWarnings: true,
-                preferFreeFormats: true,
-                addHeader: [
-                    'referer:youtube.com',
-                    'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                ]
-            });
-
-            if (!videoInfo) {
+            // Attempt to fetch with retries, cookies, and rotating headers
+            const video = await this.fetchWithRetry(urlString);
+            
+            if (!video) {
                 console.error('No video information found for:', videoId);
                 return null;
             }
 
             // Process video data
-            const videoData = this.processVideoInfo(videoInfo);
+            const videoData = this.processVideoInfo(video);
             
             // Cache the result
             this.cache.set(cacheKey, videoData);
@@ -87,9 +267,18 @@ export class YouTube {
         } catch (error) {
             console.error('Error fetching video info:', {
                 message: error.message,
-                stderr: error.stderr || 'No stderr output',
+                stderr: error.stderr ? error.stderr.substring(0, 300) + '...' : 'No stderr',
                 url: url?.toString()
             });
+
+            // Handle specific YouTube errors with helpful messages
+            if (error.message?.includes('Sign in to confirm')) {
+                console.error('🔐 YouTube authentication required. Ensure cookies are valid and recent.');
+            } else if (error.message?.includes('403')) {
+                console.error('🚫 Access forbidden - may need fresh cookies or different IP.');
+            } else if (error.message?.includes('429')) {
+                console.error('⏳ Rate limited - too many requests. Wait before trying again.');
+            }
 
             return null;
         }
@@ -190,5 +379,18 @@ export class YouTube {
             hits: this.cache.getStats().hits,
             misses: this.cache.getStats().misses
         };
+    }
+
+    /**
+     * Manually refresh cookies from remote URL
+     */
+    static async refreshCookies(): Promise<boolean> {
+        try {
+            const result = await this.downloadCookies();
+            return result !== null;
+        } catch (error) {
+            console.error('Failed to refresh cookies:', error.message);
+            return false;
+        }
     }
 }
