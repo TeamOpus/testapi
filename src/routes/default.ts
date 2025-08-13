@@ -1,5 +1,5 @@
 import express, { Application } from "express";
-import defaultRoute from "./routes/default";
+import defaultRoute from "./routes/default.ts";
 
 const app: Application = express();
 const port: number = parseInt(process.env.PORT) || 4131;
